@@ -14,11 +14,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for a modern, clean, and attractive UI
 st.markdown(
     """
 <style>
-    /* Metric & Card styling */
     .hero-card {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border: 1px solid #334155;
@@ -46,7 +44,6 @@ st.markdown(
         font-size: 0.85rem;
         font-weight: 600;
     }
-    /* Buttons */
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
@@ -68,13 +65,50 @@ if "GROQ_API_KEY" not in st.secrets:
     st.stop()
 
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-# Hardcoded premier model - runs quietly under the hood
-GROQ_MODEL = "llama-3.3-70b-versatile"
 DB_FILE = "code_studio.db"
 
 
 # =========================================================
-# 2. DATABASE ENGINE (SQLite)
+# 2. DYNAMIC MODEL RESOLVER (Zero-404 Guarantee)
+# =========================================================
+@st.cache_resource
+def get_best_groq_model():
+    """Detects and returns the best active coding model in the user's Groq account."""
+    client = Groq(api_key=GROQ_API_KEY)
+    try:
+        model_list = client.models.list()
+        active_ids = [m.id for m in model_list.data]
+
+        # Priority rank of best coding and reasoning models
+        priority = [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+        ]
+        for candidate in priority:
+            if candidate in active_ids:
+                return candidate
+
+        # Fallback to any non-whisper model
+        for m_id in active_ids:
+            if not any(
+                skip in m_id.lower() for skip in ["whisper", "guard", "audio"]
+            ):
+                return m_id
+
+        return active_ids[0]
+    except Exception:
+        return "openai/gpt-oss-120b"
+
+
+GROQ_MODEL = get_best_groq_model()
+
+
+# =========================================================
+# 3. DATABASE ENGINE (SQLite)
 # =========================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -212,7 +246,7 @@ def get_saved_ideas(p_id):
 
 
 # =========================================================
-# 3. INTERNAL GROQ CALLER
+# 4. INTERNAL GROQ CALLER
 # =========================================================
 def call_groq(system_prompt, user_prompt, json_mode=False):
     client = Groq(api_key=GROQ_API_KEY)
@@ -243,11 +277,10 @@ def parse_ai_json(raw_text):
 
 
 # =========================================================
-# 4. NAVIGATION & SIDEBAR
+# 5. NAVIGATION & SIDEBAR
 # =========================================================
 all_projects = get_projects()
 
-# Session State for View Control
 if "view" not in st.session_state:
     st.session_state["view"] = (
         "create_project" if not all_projects else "workspace"
@@ -255,7 +288,7 @@ if "view" not in st.session_state:
 
 with st.sidebar:
     st.title("⚡ AI Code Studio")
-    st.caption("Engine: Ultra-Fast AI (Active)")
+    st.caption(f"Active Engine: `{GROQ_MODEL}`")
 
     st.divider()
 
@@ -273,7 +306,6 @@ with st.sidebar:
         )
         current_p_id = p_dict[selected_p_name]
 
-        # Version History & Rollback
         versions = get_versions(current_p_id)
         v_map = {
             f"v{v[0]}: {v[1]} ({v[2]})": {
@@ -306,13 +338,13 @@ with st.sidebar:
 
 
 # =========================================================
-# 5. FULL-SCREEN LANDING / CREATION PAGE
+# 6. FULL-SCREEN LANDING / CREATION PAGE
 # =========================================================
 if st.session_state["view"] == "create_project" or not all_projects:
     st.markdown(
         """
     <div class="hero-card">
-        <span class="badge">FAST AI ENGINE</span>
+        <span class="badge">LIGHTNING-FAST ENGINE</span>
         <h1 style="margin: 0; font-size: 2.2rem; font-weight: 800;">🚀 Welcome to AI Code Studio</h1>
         <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 8px;">
             Build, edit, debug, and version entire websites in seconds. Start with a prompt or paste your existing code.
@@ -406,7 +438,7 @@ if st.session_state["view"] == "create_project" or not all_projects:
 
 
 # =========================================================
-# 6. ACTIVE WORKSPACE (FULL-SCREEN STUDIO)
+# 7. ACTIVE WORKSPACE (FULL-SCREEN STUDIO)
 # =========================================================
 active_code = current_v_data["code"]
 active_v_num = current_v_data["v_num"]
@@ -520,7 +552,7 @@ if apply_btn or fix_error_btn:
 
 
 # =========================================================
-# 7. THE 4 OUTPUT TABS
+# 8. OUTPUT TABS
 # =========================================================
 st.divider()
 
