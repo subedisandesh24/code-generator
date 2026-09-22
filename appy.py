@@ -5,7 +5,7 @@ from groq import Groq
 import streamlit as st
 
 # =========================================================
-# 1. CONFIGURATION & SECRETS
+# 1. PAGE SETUP & STYLING
 # =========================================================
 st.set_page_config(
     page_title="AI Code Studio",
@@ -21,10 +21,9 @@ st.markdown(
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
         border: 1px solid #334155;
         border-radius: 16px;
-        padding: 28px;
+        padding: 24px 30px;
         color: #f8fafc;
-        margin-bottom: 24px;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+        margin-bottom: 20px;
     }
     .badge {
         display: inline-block;
@@ -34,15 +33,15 @@ st.markdown(
         border-radius: 9999px;
         font-size: 0.82rem;
         font-weight: 600;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
     }
     .version-pill {
         background: #10b981;
         color: white;
-        padding: 3px 10px;
+        padding: 4px 12px;
         border-radius: 8px;
         font-size: 0.85rem;
-        font-weight: 600;
+        font-weight: 700;
     }
     .stButton > button {
         border-radius: 8px;
@@ -73,13 +72,11 @@ DB_FILE = "code_studio.db"
 # =========================================================
 @st.cache_resource
 def get_best_groq_model():
-    """Detects and returns the best active coding model in the user's Groq account."""
     client = Groq(api_key=GROQ_API_KEY)
     try:
         model_list = client.models.list()
         active_ids = [m.id for m in model_list.data]
 
-        # Priority rank of best coding and reasoning models
         priority = [
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
@@ -92,7 +89,6 @@ def get_best_groq_model():
             if candidate in active_ids:
                 return candidate
 
-        # Fallback to any non-whisper model
         for m_id in active_ids:
             if not any(
                 skip in m_id.lower() for skip in ["whisper", "guard", "audio"]
@@ -167,7 +163,7 @@ def create_project(name, code, note="Initial Code"):
     c.execute(
         """
         INSERT INTO versions (project_id, version_num, code, change_note, missing_items, error_solution, run_status, created_at)
-        VALUES (?, 1, ?, ?, 'No missing items detected.', 'No errors reported.', '✅ Script verified and ready.', ?)
+        VALUES (?, 1, ?, ?, 'No missing dependencies detected.', 'No errors reported.', '✅ Script verified and ready.', ?)
     """,
         (p_id, code, note, now),
     )
@@ -216,6 +212,16 @@ def get_versions(p_id):
     rows = c.fetchall()
     conn.close()
     return rows
+
+
+def delete_project(p_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM versions WHERE project_id = ?", (p_id,))
+    c.execute("DELETE FROM project_ideas WHERE project_id = ?", (p_id,))
+    c.execute("DELETE FROM projects WHERE id = ?", (p_id,))
+    conn.commit()
+    conn.close()
 
 
 def save_ideas(p_id, ideas_json):
@@ -277,7 +283,7 @@ def parse_ai_json(raw_text):
 
 
 # =========================================================
-# 5. NAVIGATION & SIDEBAR
+# 5. SIDEBAR NAVIGATION
 # =========================================================
 all_projects = get_projects()
 
@@ -288,66 +294,40 @@ if "view" not in st.session_state:
 
 with st.sidebar:
     st.title("⚡ AI Code Studio")
-    st.caption(f"Active Engine: `{GROQ_MODEL}`")
+    st.caption(f"Engine: `{GROQ_MODEL}`")
 
     st.divider()
 
-    if st.button("➕ Create New Project", use_container_width=True):
+    if st.button(
+        "➕ Create New Project", type="primary", use_container_width=True
+    ):
         st.session_state["view"] = "create_project"
         st.rerun()
 
     if all_projects:
-        st.subheader("📂 Your Projects")
+        st.subheader("📂 Select Project")
         p_dict = {name: pid for pid, name in all_projects}
         selected_p_name = st.selectbox(
-            "Active Project",
+            "Active Project:",
             list(p_dict.keys()),
             on_change=lambda: st.session_state.update({"view": "workspace"}),
         )
         current_p_id = p_dict[selected_p_name]
-
         versions = get_versions(current_p_id)
-        v_map = {
-            f"v{v[0]}: {v[1]} ({v[2]})": {
-                "v_num": v[0],
-                "note": v[1],
-                "code": v[3],
-                "missing": v[4],
-                "error": v[5],
-                "status": v[6],
-            }
-            for v in versions
-        }
-
-        st.divider()
-        st.subheader("⏪ Version History")
-        selected_v_key = st.selectbox("Past Versions:", list(v_map.keys()))
-        current_v_data = v_map[selected_v_key]
-
-        if st.button("⏮️ Rollback to Selected", use_container_width=True):
-            save_version(
-                current_p_id,
-                current_v_data["code"],
-                f"Restored from v{current_v_data['v_num']}",
-                current_v_data["missing"],
-                "Rolled back to previous stable state.",
-                "✅ Restored from previous version",
-            )
-            st.success("Rolled back successfully!")
-            st.rerun()
+        current_v_data = versions[0]  # Latest version by default
 
 
 # =========================================================
-# 6. FULL-SCREEN LANDING / CREATION PAGE
+# 6. FULL-SCREEN PROJECT CREATION PAGE
 # =========================================================
 if st.session_state["view"] == "create_project" or not all_projects:
     st.markdown(
         """
     <div class="hero-card">
-        <span class="badge">LIGHTNING-FAST ENGINE</span>
-        <h1 style="margin: 0; font-size: 2.2rem; font-weight: 800;">🚀 Welcome to AI Code Studio</h1>
-        <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 8px;">
-            Build, edit, debug, and version entire websites in seconds. Start with a prompt or paste your existing code.
+        <span class="badge">PROJECT BUILDER</span>
+        <h1 style="margin: 0; font-size: 2.2rem; font-weight: 800;">🚀 Start a New Project</h1>
+        <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 8px;">
+            Create a completely new website with AI, or import an existing codebase to manage and edit.
         </p>
     </div>
     """,
@@ -355,29 +335,29 @@ if st.session_state["view"] == "create_project" or not all_projects:
     )
 
     tab_scratch, tab_paste = st.tabs([
-        "✨ Create from Scratch (Prompt)",
-        "📋 Import Existing Code",
+        "✨ Generate from Prompt (From Scratch)",
+        "📋 Import / Paste Existing Code",
     ])
 
     with tab_scratch:
-        c1, c2 = st.columns([1, 1])
+        c1, c2 = st.columns([3, 2])
         with c1:
             scratch_name = st.text_input(
-                "Project Name", placeholder="e.g., E-Commerce-Dashboard"
+                "Project Name", placeholder="e.g., Fitness-Tracker-App"
             )
             scratch_prompt = st.text_area(
                 "Describe the website you want to build:",
-                height=200,
-                placeholder="e.g., Build a modern, clean Streamlit dashboard for a fitness tracker. Include metric cards, weekly workout charts, workout log form, and dark styling...",
+                height=180,
+                placeholder="e.g., Build a modern Streamlit app for tracking daily habits. Include streak counters, weekly progress charts, category filters, and clean styling...",
             )
             if st.button(
-                "🚀 Generate Website & Start Studio",
+                "🚀 Generate & Open Studio",
                 type="primary",
                 use_container_width=True,
             ):
                 if scratch_name.strip() and scratch_prompt.strip():
-                    with st.spinner("Generating full website codebase..."):
-                        sys_p = "You are an elite software architect. Generate a 100% complete, fully working, attractive single-file Python/Streamlit script based on the prompt. Do not omit code. Return only raw code inside triple backticks."
+                    with st.spinner("Generating complete codebase..."):
+                        sys_p = "You are an elite software architect. Generate a 100% complete, fully working single-file Python/Streamlit script based on the prompt. Do not omit code. Return only raw code inside triple backticks."
                         code_res = call_groq(
                             sys_p, scratch_prompt, json_mode=False
                         )
@@ -401,28 +381,24 @@ if st.session_state["view"] == "create_project" or not all_projects:
 
         with c2:
             st.info("""
-            **💡 Tips for best results:**
-            - Mention specific features: *e.g., charts, login form, metric cards, sidebar filters*.
-            - The AI writes the full Python/Streamlit code ready to copy directly to GitHub.
-            - Once generated, you can refine small features or paste errors in the next step.
+            **💡 What happens next:**
+            - The AI writes the 100% complete script (no placeholders).
+            - It saves it as **Version 1 (v1)**.
+            - You can immediately copy it to GitHub, make edits, or test new ideas.
             """)
 
     with tab_paste:
         paste_name = st.text_input(
-            "Project Name",
-            placeholder="e.g., Portfolio-Website",
-            key="paste_name",
+            "Project Name", placeholder="e.g., My-Portfolio", key="paste_name"
         )
         paste_code = st.text_area(
-            "Paste your existing script:",
-            height=250,
+            "Paste your existing code here:",
+            height=220,
             placeholder="Paste your long script here...",
             key="paste_code",
         )
         if st.button(
-            "💾 Import Code & Open Studio",
-            type="primary",
-            use_container_width=True,
+            "💾 Save & Open Studio", type="primary", use_container_width=True
         ):
             if paste_name.strip() and paste_code.strip():
                 try:
@@ -438,28 +414,36 @@ if st.session_state["view"] == "create_project" or not all_projects:
 
 
 # =========================================================
-# 7. ACTIVE WORKSPACE (FULL-SCREEN STUDIO)
+# 7. ACTIVE WORKSPACE
 # =========================================================
-active_code = current_v_data["code"]
-active_v_num = current_v_data["v_num"]
+active_v_num = current_v_data[0]
+active_note = current_v_data[1]
+active_created = current_v_data[2]
+active_code = current_v_data[3]
+active_missing = current_v_data[4]
+active_error = current_v_data[5]
+active_status = current_v_data[6]
 
-# Top Header Banner
+total_lines = len(active_code.splitlines())
+
+# Workspace Header
 st.markdown(
     f"""
-<div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; background: #1e293b; border-radius: 12px; margin-bottom: 20px;">
+<div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; background: #1e293b; border-radius: 12px; margin-bottom: 20px;">
     <div>
-        <span style="font-size: 1.4rem; font-weight: 800; color: #f8fafc;">📁 {selected_p_name}</span>
-        <span style="margin-left: 14px;" class="version-pill">v{active_v_num}</span>
+        <span style="font-size: 1.5rem; font-weight: 800; color: #f8fafc;">📁 {selected_p_name}</span>
+        <span style="margin-left: 12px;" class="version-pill">Active: v{active_v_num}</span>
+        <span style="margin-left: 10px; color: #94a3b8; font-size: 0.88rem;">({total_lines} lines of code)</span>
     </div>
-    <div style="color: #94a3b8; font-size: 0.9rem;">
-        Note: {current_v_data['note']}
+    <div style="color: #cbd5e1; font-size: 0.9rem;">
+        Latest Edit: <em>{active_note}</em>
     </div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
-# Input Section: Modify Code OR Paste Terminal Error
+# Input Box: Make a Change OR Fix an Error
 with st.container():
     c1, c2 = st.columns(2)
 
@@ -467,8 +451,8 @@ with st.container():
         st.markdown("#### 📝 Request a Change")
         user_change = st.text_area(
             "Describe the feature or UI tweak to make:",
-            height=120,
-            placeholder="e.g., Change navbar color to dark blue, fix the button spacing, and add an alert popup...",
+            height=110,
+            placeholder="e.g., Change navbar color to dark blue, fix button spacing, and add an alert popup...",
             label_visibility="collapsed",
         )
         apply_btn = st.button(
@@ -478,10 +462,10 @@ with st.container():
         )
 
     with c2:
-        st.markdown("#### ⚠️ Fix an Error")
+        st.markdown("#### ⚠️ Fix a Streamlit / Terminal Error")
         user_error = st.text_area(
             "Paste terminal or Streamlit red error traceback:",
-            height=120,
+            height=110,
             placeholder="e.g., StreamlitDuplicateElementKey: There are multiple identical elements with key='submit'...",
             label_visibility="collapsed",
         )
@@ -489,7 +473,7 @@ with st.container():
             "🛠️ Fix Error Now", use_container_width=True
         )
 
-# AI Modification Pipeline
+# AI Execution Logic
 if apply_btn or fix_error_btn:
     req_type = "ERROR_FIX" if fix_error_btn else "FEATURE_CHANGE"
     target_prompt = user_error if fix_error_btn else user_change
@@ -535,7 +519,7 @@ if apply_btn or fix_error_btn:
                     "error_solution", "Code successfully updated."
                 )
                 status_info = parsed.get("run_status", "✅ Verified")
-                note = f"Fix: {target_prompt[:30]}" if fix_error_btn else f"Change: {target_prompt[:30]}"
+                note = f"Fix: {target_prompt[:35]}" if fix_error_btn else f"Change: {target_prompt[:35]}"
 
                 save_version(
                     current_p_id,
@@ -552,22 +536,28 @@ if apply_btn or fix_error_btn:
 
 
 # =========================================================
-# 8. OUTPUT TABS
+# 8. WORKSPACE TABS
 # =========================================================
 st.divider()
 
-tab_code, tab_missing, tab_error, tab_ideas = st.tabs([
-    "📋 1. Full Script (Ready for GitHub)",
-    "⚠️ 2. Missing Items & Audit",
-    "🔍 3. Error Diagnosis & Solution",
-    "💡 4. Innovative Feature Suggestions",
-])
+tab_code, tab_history, tab_missing, tab_error, tab_ideas, tab_settings = (
+    st.tabs([
+        "📋 1. Full Script (Copy/Download)",
+        "📜 2. Edit History & Timeline",
+        "⚠️ 3. Missing Dependencies",
+        "🔍 4. Error Diagnosis",
+        "💡 5. Innovative Ideas",
+        "⚙️ 6. Manage / Delete Project",
+    ])
+)
 
-# TAB 1: FULL SCRIPT
+# ----------------- TAB 1: FULL SCRIPT -----------------
 with tab_code:
     col_stat, col_btn = st.columns([3, 1])
     with col_stat:
-        st.info(f"**Execution Status:** {current_v_data['status']}")
+        st.info(
+            f"**Status:** {active_status} &nbsp;|&nbsp; **Lines:** {total_lines}"
+        )
     with col_btn:
         st.download_button(
             label="📥 Download .py File",
@@ -577,23 +567,73 @@ with tab_code:
             use_container_width=True,
         )
 
-    st.caption("Hover over the top-right corner of the code block below and click the **Copy icon** to copy into GitHub.")
+    st.markdown(
+        "👉 **Ready for GitHub:** Click the **Copy icon** at the top right corner of the code block below, then paste directly into GitHub."
+    )
     st.code(active_code, language="python")
 
-# TAB 2: MISSING ITEMS
+# ----------------- TAB 2: EDIT HISTORY & ROLLBACK -----------------
+with tab_history:
+    st.subheader(f"📜 Version History Timeline for `{selected_p_name}`")
+    st.caption(
+        "Every change you made is recorded below. You can inspect or rollback to any previous version:"
+    )
+
+    for v in versions:
+        v_num, v_note, v_time, v_code, v_missing, v_err, v_status = v
+        is_current = v_num == active_v_num
+
+        with st.expander(
+            f"{'🟢 [ACTIVE] ' if is_current else '⚪ '}Version {v_num} — {v_note} ({v_time})",
+            expanded=is_current,
+        ):
+            c_info, c_action = st.columns([3, 1])
+            with c_info:
+                st.markdown(f"**Change Note:** {v_note}")
+                st.markdown(f"**Saved At:** {v_time}")
+                st.markdown(f"**Verification:** {v_status}")
+            with c_action:
+                if not is_current:
+                    if st.button(
+                        f"⏮️ Restore v{v_num}",
+                        key=f"btn_restore_{v_num}",
+                        use_container_width=True,
+                    ):
+                        save_version(
+                            current_p_id,
+                            v_code,
+                            f"Restored to v{v_num}",
+                            v_missing,
+                            v_err,
+                            f"✅ Restored from v{v_num}",
+                        )
+                        st.success(
+                            f"Successfully rolled back to Version {v_num}!"
+                        )
+                        st.rerun()
+                else:
+                    st.success("Currently Active")
+
+            st.markdown("##### Code at this version:")
+            st.code(v_code, language="python")
+
+# ----------------- TAB 3: MISSING DEPENDENCIES -----------------
 with tab_missing:
     st.subheader("🔍 Missing Dependencies & Configuration Audit")
-    st.write(current_v_data["missing"])
+    st.write(active_missing)
+    st.info(
+        "💡 If any external Python packages are listed above, make sure to add them to your `requirements.txt`."
+    )
 
-# TAB 3: ERROR SOLUTION
+# ----------------- TAB 4: ERROR DIAGNOSIS -----------------
 with tab_error:
     st.subheader("🛠️ Error Diagnosis & Fix Details")
-    st.write(current_v_data["error"])
+    st.write(active_error)
 
-# TAB 4: INNOVATIVE IDEAS & PROCEED
+# ----------------- TAB 5: INNOVATIVE IDEAS -----------------
 with tab_ideas:
-    st.subheader(f"💡 Innovative Features for `{selected_p_name}`")
-    st.caption("Analyze your codebase to propose 5-6 features with architecture flowcharts:")
+    st.subheader(f"💡 Innovative Feature Suggestions for `{selected_p_name}`")
+    st.caption("Generate smart, project-specific features complete with architecture flowcharts:")
 
     if st.button("🔮 Generate 5-6 Smart Ideas for this Project"):
         with st.spinner("Analyzing project architecture and formulating features..."):
@@ -703,6 +743,27 @@ with tab_ideas:
                 except Exception as e:
                     st.error(f"Integration failed: {str(e)}")
     else:
-        st.info(
-            "Click 'Generate 5-6 Smart Ideas for this Project' above to formulate enhancement ideas."
-        )
+        st.info("Click the button above to generate smart feature ideas.")
+
+# ----------------- TAB 6: MANAGE / DELETE PROJECT -----------------
+with tab_settings:
+    st.subheader(f"⚙️ Manage & Delete `{selected_p_name}`")
+    st.write(
+        "Need to clean up this project? You can permanently remove it and all of its version history below."
+    )
+
+    st.markdown("---")
+    st.warning("⚠️ **Danger Zone:** This action is permanent and cannot be undone.")
+
+    confirm_box = st.checkbox(
+        f"I confirm that I want to permanently delete **{selected_p_name}** and all its versions."
+    )
+
+    if confirm_box:
+        if st.button(
+            f"🚨 Permanently Delete '{selected_p_name}'", type="primary"
+        ):
+            delete_project(current_p_id)
+            st.success(f"Project '{selected_p_name}' was successfully deleted.")
+            st.session_state["view"] = "create_project"
+            st.rerun()
