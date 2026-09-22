@@ -90,7 +90,6 @@ GROQ_MODEL = get_best_groq_model()
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 1. Ensure projects table exists
     c.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +97,6 @@ def init_db():
             created_at TEXT
         )
     """)
-    # 2. Ensure versions table exists
     c.execute("""
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +111,7 @@ def init_db():
     """)
     conn.commit()
 
-    # 3. Self-Healing Migration: Add 'summary' column if missing from existing DB
+    # Self-Healing: add missing columns safely
     c.execute("PRAGMA table_info(versions)")
     existing_columns = [col[1] for col in c.fetchall()]
     if "summary" not in existing_columns:
@@ -131,14 +129,22 @@ def init_db():
 init_db()
 
 
-def parse_files(raw_str):
+def parse_data(raw_str):
+    """Safely extracts files and any additional required files."""
     try:
         data = json.loads(raw_str)
-        if isinstance(data, dict) and "app.py" in data:
-            return data
+        if isinstance(data, dict):
+            # Format with separated other_requirements
+            if "files" in data:
+                return data.get("files", {}), data.get(
+                    "other_requirements", []
+                )
+            # Legacy format
+            if "app.py" in data:
+                return data, []
     except Exception:
         pass
-    return {"app.py": raw_str, "requirements.txt": "streamlit\ngroq\n"}
+    return {"app.py": raw_str, "requirements.txt": "streamlit\ngroq\n"}, []
 
 
 def get_projects():
@@ -150,7 +156,7 @@ def get_projects():
     return rows
 
 
-def create_project(name, files_dict, note="Initial Code"):
+def create_project(name, package_dict, note="Initial Code"):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -163,14 +169,14 @@ def create_project(name, files_dict, note="Initial Code"):
         INSERT INTO versions (project_id, version_num, code, change_note, summary, created_at)
         VALUES (?, 1, ?, ?, 'Initial project setup ready.', ?)
     """,
-        (p_id, json.dumps(files_dict), note, now),
+        (p_id, json.dumps(package_dict), note, now),
     )
     conn.commit()
     conn.close()
     return p_id
 
 
-def save_version(p_id, files_dict, note, summary="Updated successfully."):
+def save_version(p_id, package_dict, note):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -182,9 +188,9 @@ def save_version(p_id, files_dict, note, summary="Updated successfully."):
     c.execute(
         """
         INSERT INTO versions (project_id, version_num, code, change_note, summary, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'Updated.', ?)
     """,
-        (p_id, new_v, json.dumps(files_dict), note, summary, now),
+        (p_id, new_v, json.dumps(package_dict), note, now),
     )
     conn.commit()
     conn.close()
@@ -195,7 +201,7 @@ def get_versions(p_id):
     c = conn.cursor()
     c.execute(
         """
-        SELECT version_num, change_note, created_at, code, COALESCE(summary, 'No summary available.') 
+        SELECT version_num, change_note, created_at, code, COALESCE(summary, '') 
         FROM versions WHERE project_id = ? ORDER BY version_num DESC
     """,
         (p_id,),
@@ -239,7 +245,7 @@ def call_groq(system_prompt, user_prompt):
 
 
 # =========================================================
-# 5. SIDEBAR: CLEAN & MINIMAL CONTROLS
+# 5. SIDEBAR: CLEAN CONTROLS
 # =========================================================
 all_projects = get_projects()
 
@@ -255,14 +261,14 @@ with st.sidebar:
         )
         current_p_id = p_dict[selected_p_name]
 
-        # Version handling with safety checks
+        # Fetch versions safely
         versions = get_versions(current_p_id)
         if not versions:
             st.warning("No versions found for this project.")
             st.stop()
 
         current_v = versions[0]
-        active_files = parse_files(current_v[3])
+        active_files, active_other = parse_data(current_v[3])
         active_v_num = current_v[0]
 
         # Version Rollback
@@ -274,11 +280,14 @@ with st.sidebar:
         if chosen_v_num != active_v_num:
             if st.button("⏮️ Rollback to this Version", use_container_width=True):
                 target_v = [v for v in versions if v[0] == chosen_v_num][0]
+                target_files, target_other = parse_data(target_v[3])
                 save_version(
                     current_p_id,
-                    parse_files(target_v[3]),
+                    {
+                        "files": target_files,
+                        "other_requirements": target_other,
+                    },
                     f"Rollback to v{chosen_v_num}",
-                    f"Restored code from version {chosen_v_num}.",
                 )
                 st.success(f"Restored to v{chosen_v_num}!")
                 st.rerun()
@@ -330,7 +339,7 @@ if not all_projects or st.session_state.get("show_new", False):
             )
             if st.button("⚡ Generate Website", type="primary"):
                 if new_name.strip() and new_prompt.strip():
-                    with st.spinner("Building your project files..."):
+                    with st.spinner("Building project files with Groq..."):
                         sys_p = """
                         You are an expert developer. Generate a complete Streamlit app.
                         Return JSON:
@@ -339,15 +348,25 @@ if not all_projects or st.session_state.get("show_new", False):
                                 "app.py": "100% complete Python code without omissions",
                                 "requirements.txt": "pip package names, one per line"
                             },
-                            "summary": "Short summary of generated app"
+                            "other_requirements": [
+                                {
+                                    "name": "File name (e.g., .env or config.json)",
+                                    "content": "Exact content to put inside this file"
+                                }
+                            ]
                         }
+                        If no other files are needed, keep 'other_requirements' as an empty list [].
                         """
                         try:
                             res = call_groq(sys_p, new_prompt)
+                            package_data = {
+                                "files": res.get("files", {}),
+                                "other_requirements": res.get(
+                                    "other_requirements", []
+                                ),
+                            }
                             create_project(
-                                new_name.strip(),
-                                res.get("files", {}),
-                                "Initial Build",
+                                new_name.strip(), package_data, "Initial Build"
                             )
                             st.session_state["show_new"] = False
                             st.rerun()
@@ -361,13 +380,15 @@ if not all_projects or st.session_state.get("show_new", False):
             )
             if st.button("💾 Save Project", type="primary"):
                 if new_name.strip() and pasted_app.strip():
-                    create_project(
-                        new_name.strip(),
-                        {
+                    package_data = {
+                        "files": {
                             "app.py": pasted_app,
                             "requirements.txt": "streamlit\n",
                         },
-                        "Imported Code",
+                        "other_requirements": [],
+                    }
+                    create_project(
+                        new_name.strip(), package_data, "Imported Code"
                     )
                     st.session_state["show_new"] = False
                     st.rerun()
@@ -393,7 +414,7 @@ st.markdown(
         <span style="margin-left: 10px;" class="badge-v">v{active_v_num}</span>
     </div>
     <div style="color: #94a3b8; font-size: 0.9rem;">
-        Note: {current_v[1]} ({current_v[2]})
+        Latest Edit: {current_v[1]} ({current_v[2]})
     </div>
 </div>
 """,
@@ -413,7 +434,7 @@ with col_in:
     )
 
 with col_btn:
-    st.write("")  # alignment spacer
+    st.write("")
     run_action = st.button(
         "🚀 Update Code", type="primary", use_container_width=True
     )
@@ -426,9 +447,10 @@ if run_action:
         with st.spinner("Updating files..."):
             sys_prompt = """
             You are a senior software engineer.
-            Given current files (app.py, requirements.txt) and user instructions (or error traceback):
+            Given current files (app.py, requirements.txt, and others) and user instructions (or error traceback):
             1. Apply the modification or fix the error completely.
             2. Add any new pip dependencies needed to requirements.txt.
+            3. If any other file or setup (like .env, config, or assets) is required, specify its exact name and content.
             
             Return JSON:
             {
@@ -436,8 +458,14 @@ if run_action:
                     "app.py": "Complete updated Python script without abbreviations or placeholders",
                     "requirements.txt": "Full pip package list, one per line"
                 },
-                "summary": "1-2 sentence explanation of what was changed or fixed"
+                "other_requirements": [
+                    {
+                        "name": "Exact file name (e.g., .env or config.json)",
+                        "content": "Exact content to put inside this file"
+                    }
+                ]
             }
+            If no other files are needed, keep 'other_requirements' as an empty list [].
             """
             user_prompt = f"""
             --- CURRENT app.py ---
@@ -451,14 +479,15 @@ if run_action:
             """
             try:
                 res = call_groq(sys_prompt, user_prompt)
-                new_files = res.get("files", active_files)
-                summary_text = res.get("summary", "Updated.")
+                new_package_data = {
+                    "files": res.get("files", active_files),
+                    "other_requirements": res.get("other_requirements", []),
+                }
 
                 save_version(
                     current_p_id,
-                    new_files,
+                    new_package_data,
                     user_instruction[:35],
-                    summary_text,
                 )
                 st.success("✅ Code successfully updated!")
                 st.rerun()
@@ -468,14 +497,15 @@ if run_action:
 st.divider()
 
 # =========================================================
-# 8. TWO SEPARATED FILES (READY TO COPY)
+# 8. SEPARATED FILES & OTHER REQUIRED ITEMS TABS
 # =========================================================
-tab_app, tab_req, tab_summary = st.tabs([
+tab_app, tab_req, tab_other = st.tabs([
     "📄 app.py (Full Script)",
     "📦 requirements.txt (Dependencies)",
-    "📝 What Changed?",
+    "📁 Other Required Files & Setup",
 ])
 
+# TAB 1: app.py
 with tab_app:
     c_info, c_dl = st.columns([4, 1])
     with c_info:
@@ -492,6 +522,7 @@ with tab_app:
         )
     st.code(active_files.get("app.py", ""), language="python")
 
+# TAB 2: requirements.txt
 with tab_req:
     c_info2, c_dl2 = st.columns([4, 1])
     with c_info2:
@@ -508,8 +539,38 @@ with tab_req:
         )
     st.code(active_files.get("requirements.txt", ""), language="text")
 
-with tab_summary:
-    st.markdown("### 📋 Latest Version Summary")
-    st.write(current_v[4])
-    st.markdown(f"**Triggered by:** `{current_v[1]}`")
-    st.markdown(f"**Saved on:** `{current_v[2]}`")
+# TAB 3: OTHER REQUIRED FILES & SETUP
+with tab_other:
+    if active_other and len(active_other) > 0:
+        st.subheader("📁 Additional Required Files & Configuration")
+        st.caption(
+            "The following extra files are required for your project to work properly:"
+        )
+
+        for idx, item in enumerate(active_other):
+            file_title = item.get("name", f"File_{idx+1}")
+            file_body = item.get("content", "")
+
+            st.markdown(f"#### 📄 File Name: `{file_title}`")
+            st.caption(
+                f"Create a file named **`{file_title}`** in your repository and paste this exact content:"
+            )
+
+            col_sub1, col_sub2 = st.columns([4, 1])
+            with col_sub2:
+                st.download_button(
+                    label=f"📥 Download {file_title}",
+                    data=file_body,
+                    file_name=file_title,
+                    mime="text/plain",
+                    key=f"dl_other_{idx}",
+                    use_container_width=True,
+                )
+
+            st.code(file_body, language="text")
+            st.markdown("---")
+    else:
+        st.success("✅ **No additional files or configurations required!**")
+        st.info(
+            "Your project is self-contained. It only requires **`app.py`** and **`requirements.txt`** to run successfully."
+        )
