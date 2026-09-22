@@ -4,37 +4,81 @@ from datetime import datetime
 from groq import Groq
 import streamlit as st
 
+# =========================================================
+# 1. CONFIGURATION & SECRETS
+# =========================================================
 st.set_page_config(
-    page_title="AI Code Studio (Powered by Groq)",
+    page_title="AI Code Studio",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# =========================================================
-# 1. VERIFY STREAMLIT SECRETS (GROQ_API_KEY)
-# =========================================================
+# Custom CSS for a modern, clean, and attractive UI
+st.markdown(
+    """
+<style>
+    /* Metric & Card styling */
+    .hero-card {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        border: 1px solid #334155;
+        border-radius: 16px;
+        padding: 28px;
+        color: #f8fafc;
+        margin-bottom: 24px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    }
+    .badge {
+        display: inline-block;
+        background: #3b82f6;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 9999px;
+        font-size: 0.82rem;
+        font-weight: 600;
+        margin-bottom: 12px;
+    }
+    .version-pill {
+        background: #10b981;
+        color: white;
+        padding: 3px 10px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+    /* Buttons */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 if "GROQ_API_KEY" not in st.secrets:
     st.error("""
-    ⚠️ **GROQ_API_KEY is missing from Streamlit Secrets!**
+    ⚠️ **GROQ_API_KEY is missing!**
     
-    Please create a file at `.streamlit/secrets.toml` and add:
+    Please add your Groq key into `.streamlit/secrets.toml`:
     ```toml
-    GROQ_API_KEY = "gsk_your_groq_key_here"
+    GROQ_API_KEY = "gsk_your_groq_api_key_here"
     ```
     """)
     st.stop()
 
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+# Hardcoded premier model - runs quietly under the hood
+GROQ_MODEL = "llama-3.3-70b-versatile"
 DB_FILE = "code_studio.db"
 
 
 # =========================================================
-# 2. DATABASE SETUP (Built-in SQLite)
+# 2. DATABASE ENGINE (SQLite)
 # =========================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Projects table
     c.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +86,6 @@ def init_db():
             created_at TEXT
         )
     """)
-    # Versions table
     c.execute("""
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +100,6 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects(id)
         )
     """)
-    # Stored ideas table
     c.execute("""
         CREATE TABLE IF NOT EXISTS project_ideas (
             project_id INTEGER PRIMARY KEY,
@@ -91,7 +133,7 @@ def create_project(name, code, note="Initial Code"):
     c.execute(
         """
         INSERT INTO versions (project_id, version_num, code, change_note, missing_items, error_solution, run_status, created_at)
-        VALUES (?, 1, ?, ?, 'No missing items detected.', 'No errors reported.', '✅ Script is verified and ready to run.', ?)
+        VALUES (?, 1, ?, ?, 'No missing items detected.', 'No errors reported.', '✅ Script verified and ready.', ?)
     """,
         (p_id, code, note, now),
     )
@@ -170,12 +212,12 @@ def get_saved_ideas(p_id):
 
 
 # =========================================================
-# 3. GROQ AI ENGINE
+# 3. INTERNAL GROQ CALLER
 # =========================================================
-def call_groq(model, system_prompt, user_prompt, json_mode=False):
+def call_groq(system_prompt, user_prompt, json_mode=False):
     client = Groq(api_key=GROQ_API_KEY)
     kwargs = {
-        "model": model,
+        "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -201,65 +243,111 @@ def parse_ai_json(raw_text):
 
 
 # =========================================================
-# 4. SIDEBAR: PROJECT SETUP & ROLLBACK CONTROLS
+# 4. NAVIGATION & SIDEBAR
 # =========================================================
-with st.sidebar:
-    st.title("⚡ Groq Control Panel")
-    st.caption("🔑 API Key loaded securely from `secrets.toml`")
+all_projects = get_projects()
 
-    # High-speed Groq models
-    model_choice = st.selectbox(
-        "Select Groq Model",
-        [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-        ],
+# Session State for View Control
+if "view" not in st.session_state:
+    st.session_state["view"] = (
+        "create_project" if not all_projects else "workspace"
     )
 
+with st.sidebar:
+    st.title("⚡ AI Code Studio")
+    st.caption("Engine: Ultra-Fast AI (Active)")
+
     st.divider()
-    st.subheader("📁 Project Management")
 
-    with st.expander("➕ Create New Project"):
-        p_name_input = st.text_input("Project Name")
-        create_mode = st.radio(
-            "Creation Mode",
-            [
-                "Paste Existing Script",
-                "Generate from Scratch (Prompt)",
-            ],
+    if st.button("➕ Create New Project", use_container_width=True):
+        st.session_state["view"] = "create_project"
+        st.rerun()
+
+    if all_projects:
+        st.subheader("📂 Your Projects")
+        p_dict = {name: pid for pid, name in all_projects}
+        selected_p_name = st.selectbox(
+            "Active Project",
+            list(p_dict.keys()),
+            on_change=lambda: st.session_state.update({"view": "workspace"}),
         )
+        current_p_id = p_dict[selected_p_name]
 
-        if create_mode == "Paste Existing Script":
-            p_initial_code = st.text_area(
-                "Paste your existing script here:", height=180
+        # Version History & Rollback
+        versions = get_versions(current_p_id)
+        v_map = {
+            f"v{v[0]}: {v[1]} ({v[2]})": {
+                "v_num": v[0],
+                "note": v[1],
+                "code": v[3],
+                "missing": v[4],
+                "error": v[5],
+                "status": v[6],
+            }
+            for v in versions
+        }
+
+        st.divider()
+        st.subheader("⏪ Version History")
+        selected_v_key = st.selectbox("Past Versions:", list(v_map.keys()))
+        current_v_data = v_map[selected_v_key]
+
+        if st.button("⏮️ Rollback to Selected", use_container_width=True):
+            save_version(
+                current_p_id,
+                current_v_data["code"],
+                f"Restored from v{current_v_data['v_num']}",
+                current_v_data["missing"],
+                "Rolled back to previous stable state.",
+                "✅ Restored from previous version",
             )
-            if st.button("Save New Project"):
-                if p_name_input.strip() and p_initial_code.strip():
-                    try:
-                        create_project(
-                            p_name_input.strip(), p_initial_code.strip()
-                        )
-                        st.success(
-                            f"Project '{p_name_input}' created successfully!"
-                        )
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("A project with this name already exists.")
-                else:
-                    st.warning("Please provide both a project name and code.")
-        else:
-            p_prompt = st.text_area(
-                "Describe the website to generate:",
-                height=150,
-                placeholder="e.g., Build a modern responsive gym landing page with timetable, pricing tiers, and contact form...",
+            st.success("Rolled back successfully!")
+            st.rerun()
+
+
+# =========================================================
+# 5. FULL-SCREEN LANDING / CREATION PAGE
+# =========================================================
+if st.session_state["view"] == "create_project" or not all_projects:
+    st.markdown(
+        """
+    <div class="hero-card">
+        <span class="badge">FAST AI ENGINE</span>
+        <h1 style="margin: 0; font-size: 2.2rem; font-weight: 800;">🚀 Welcome to AI Code Studio</h1>
+        <p style="color: #94a3b8; font-size: 1.1rem; margin-top: 8px;">
+            Build, edit, debug, and version entire websites in seconds. Start with a prompt or paste your existing code.
+        </p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    tab_scratch, tab_paste = st.tabs([
+        "✨ Create from Scratch (Prompt)",
+        "📋 Import Existing Code",
+    ])
+
+    with tab_scratch:
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            scratch_name = st.text_input(
+                "Project Name", placeholder="e.g., E-Commerce-Dashboard"
             )
-            if st.button("✨ Generate Project from Scratch"):
-                if p_name_input.strip() and p_prompt.strip():
-                    with st.spinner("Groq is generating your complete code at ultra-high speed..."):
-                        sys_p = "You are a master web developer. Generate a 100% complete, fully working single-file Python/Streamlit script based on the prompt. Do not abbreviate or omit code. Output raw code inside triple backticks."
+            scratch_prompt = st.text_area(
+                "Describe the website you want to build:",
+                height=200,
+                placeholder="e.g., Build a modern, clean Streamlit dashboard for a fitness tracker. Include metric cards, weekly workout charts, workout log form, and dark styling...",
+            )
+            if st.button(
+                "🚀 Generate Website & Start Studio",
+                type="primary",
+                use_container_width=True,
+            ):
+                if scratch_name.strip() and scratch_prompt.strip():
+                    with st.spinner("Generating full website codebase..."):
+                        sys_p = "You are an elite software architect. Generate a 100% complete, fully working, attractive single-file Python/Streamlit script based on the prompt. Do not omit code. Return only raw code inside triple backticks."
                         code_res = call_groq(
-                            model_choice, sys_p, p_prompt, json_mode=False
+                            sys_p, scratch_prompt, json_mode=False
                         )
                         cleaned = (
                             "\n".join(code_res.splitlines()[1:-1])
@@ -268,92 +356,88 @@ with st.sidebar:
                         )
                         try:
                             create_project(
-                                p_name_input.strip(),
+                                scratch_name.strip(),
                                 cleaned,
-                                f"Created from prompt: {p_prompt[:40]}...",
+                                f"Generated from prompt: {scratch_prompt[:35]}...",
                             )
-                            st.success(
-                                f"Project '{p_name_input}' created successfully!"
-                            )
+                            st.session_state["view"] = "workspace"
                             st.rerun()
                         except sqlite3.IntegrityError:
-                            st.error("A project with this name already exists.")
+                            st.error("A project with this name already exists!")
                 else:
-                    st.warning(
-                        "Please provide both a project name and a prompt."
-                    )
+                    st.warning("Please provide both a project name and prompt.")
 
-    # Active project selector
-    all_projects = get_projects()
-    if not all_projects:
-        st.info("👈 Please create a project above to get started.")
-        st.stop()
+        with c2:
+            st.info("""
+            **💡 Tips for best results:**
+            - Mention specific features: *e.g., charts, login form, metric cards, sidebar filters*.
+            - The AI writes the full Python/Streamlit code ready to copy directly to GitHub.
+            - Once generated, you can refine small features or paste errors in the next step.
+            """)
 
-    st.divider()
-    st.subheader("📂 Active Workspace")
-    p_dict = {name: pid for pid, name in all_projects}
-    selected_p_name = st.selectbox(
-        "Select Active Project", list(p_dict.keys())
-    )
-    current_p_id = p_dict[selected_p_name]
-
-    # Version history and rollback dropdown
-    versions = get_versions(current_p_id)
-    v_map = {
-        f"v{v[0]}: {v[1]} ({v[2]})": {
-            "v_num": v[0],
-            "note": v[1],
-            "code": v[3],
-            "missing": v[4],
-            "error": v[5],
-            "status": v[6],
-        }
-        for v in versions
-    }
-
-    st.subheader("⏪ Version History & Rollback")
-    selected_v_key = st.selectbox(
-        "Browse / Restore Past Versions:", list(v_map.keys())
-    )
-    current_v_data = v_map[selected_v_key]
-
-    if st.button("⏮️ Rollback / Restore This Version"):
-        save_version(
-            current_p_id,
-            current_v_data["code"],
-            f"Restored from v{current_v_data['v_num']}",
-            current_v_data["missing"],
-            "Rolled back to previous stable state.",
-            "✅ Restored from previous version",
+    with tab_paste:
+        paste_name = st.text_input(
+            "Project Name",
+            placeholder="e.g., Portfolio-Website",
+            key="paste_name",
         )
-        st.success("Successfully rolled back to the selected version!")
-        st.rerun()
+        paste_code = st.text_area(
+            "Paste your existing script:",
+            height=250,
+            placeholder="Paste your long script here...",
+            key="paste_code",
+        )
+        if st.button(
+            "💾 Import Code & Open Studio",
+            type="primary",
+            use_container_width=True,
+        ):
+            if paste_name.strip() and paste_code.strip():
+                try:
+                    create_project(paste_name.strip(), paste_code.strip())
+                    st.session_state["view"] = "workspace"
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("A project with this name already exists!")
+            else:
+                st.warning("Please provide both a project name and your code.")
+
+    st.stop()
 
 
 # =========================================================
-# 5. MAIN PROJECT WORKSPACE
+# 6. ACTIVE WORKSPACE (FULL-SCREEN STUDIO)
 # =========================================================
 active_code = current_v_data["code"]
 active_v_num = current_v_data["v_num"]
 
-# Top Header: Displays Project Name & Current Version
+# Top Header Banner
 st.markdown(
-    f"## 📁 PROJECT: `{selected_p_name}` &nbsp;&nbsp;|&nbsp;&nbsp; 🏷️ Active Version: `v{active_v_num}`"
+    f"""
+<div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; background: #1e293b; border-radius: 12px; margin-bottom: 20px;">
+    <div>
+        <span style="font-size: 1.4rem; font-weight: 800; color: #f8fafc;">📁 {selected_p_name}</span>
+        <span style="margin-left: 14px;" class="version-pill">v{active_v_num}</span>
+    </div>
+    <div style="color: #94a3b8; font-size: 0.9rem;">
+        Note: {current_v_data['note']}
+    </div>
+</div>
+""",
+    unsafe_allow_html=True,
 )
-st.caption(f"**Log Note:** {current_v_data['note']}")
 
-st.divider()
-
-# Input Actions: Modify Code OR Paste Terminal Error
+# Input Section: Modify Code OR Paste Terminal Error
 with st.container():
-    st.subheader("✍️ Modify Code or Fix Issues")
     c1, c2 = st.columns(2)
 
     with c1:
+        st.markdown("#### 📝 Request a Change")
         user_change = st.text_area(
-            "📝 Feature / Code Modification Request:",
-            height=140,
-            placeholder="e.g., Change navbar color to dark slate, add a download button, and style the headers...",
+            "Describe the feature or UI tweak to make:",
+            height=120,
+            placeholder="e.g., Change navbar color to dark blue, fix the button spacing, and add an alert popup...",
+            label_visibility="collapsed",
         )
         apply_btn = st.button(
             "🚀 Apply Change & Save Version",
@@ -362,28 +446,28 @@ with st.container():
         )
 
     with c2:
+        st.markdown("#### ⚠️ Fix an Error")
         user_error = st.text_area(
-            "⚠️ Paste Terminal or Streamlit Error Traceback:",
-            height=140,
+            "Paste terminal or Streamlit red error traceback:",
+            height=120,
             placeholder="e.g., StreamlitDuplicateElementKey: There are multiple identical elements with key='submit'...",
+            label_visibility="collapsed",
         )
         fix_error_btn = st.button(
-            "🛠️ Fix Error & Update Script", use_container_width=True
+            "🛠️ Fix Error Now", use_container_width=True
         )
 
-# =========================================================
-# 6. GROQ PROCESSING PIPELINE
-# =========================================================
+# AI Modification Pipeline
 if apply_btn or fix_error_btn:
     req_type = "ERROR_FIX" if fix_error_btn else "FEATURE_CHANGE"
     target_prompt = user_error if fix_error_btn else user_change
 
     if not target_prompt.strip():
-        st.warning("Please enter a modification request or paste an error log.")
+        st.warning("Please type a change instruction or paste an error.")
     else:
-        with st.spinner("Groq is refactoring and verifying your code..."):
+        with st.spinner("AI is refactoring, testing, and generating full code..."):
             sys_prompt = """
-            You are a senior software architect and Streamlit/Python debugger.
+            You are a senior software architect and Python/Streamlit debugger.
             You will receive the CURRENT CODE and a REQUEST (either a modification or a traceback error).
             
             You MUST return a valid JSON object with these exact keys:
@@ -394,7 +478,7 @@ if apply_btn or fix_error_btn:
                 "error_solution": "Detailed breakdown: why the error occurred and how it was resolved in code",
                 "changelog": "Brief summary of what lines or features were updated"
             }
-            CRITICAL REQUIREMENT: 'full_code' must be complete from top to bottom. Do NOT write placeholders like '// rest of code unchanged'.
+            CRITICAL: 'full_code' must be complete from top to bottom. Do NOT write placeholders like '// rest of code'.
             """
 
             u_prompt = f"""
@@ -408,9 +492,7 @@ if apply_btn or fix_error_btn:
             """
 
             try:
-                res = call_groq(
-                    model_choice, sys_prompt, u_prompt, json_mode=True
-                )
+                res = call_groq(sys_prompt, u_prompt, json_mode=True)
                 parsed = parse_ai_json(res)
 
                 new_code = parsed.get("full_code", active_code)
@@ -421,7 +503,7 @@ if apply_btn or fix_error_btn:
                     "error_solution", "Code successfully updated."
                 )
                 status_info = parsed.get("run_status", "✅ Verified")
-                note = f"Fix: {target_prompt[:35]}" if fix_error_btn else f"Change: {target_prompt[:35]}"
+                note = f"Fix: {target_prompt[:30]}" if fix_error_btn else f"Change: {target_prompt[:30]}"
 
                 save_version(
                     current_p_id,
@@ -438,61 +520,54 @@ if apply_btn or fix_error_btn:
 
 
 # =========================================================
-# 7. OUTPUT TABS (THE 4 DEDICATED TABS)
+# 7. THE 4 OUTPUT TABS
 # =========================================================
 st.divider()
 
 tab_code, tab_missing, tab_error, tab_ideas = st.tabs([
     "📋 1. Full Script (Ready for GitHub)",
     "⚠️ 2. Missing Items & Audit",
-    "🔍 3. Error Solution & Diagnosis",
-    "💡 4. Innovative Ideas & Feature Builder",
+    "🔍 3. Error Diagnosis & Solution",
+    "💡 4. Innovative Feature Suggestions",
 ])
 
-# ----------------- TAB 1: FULL SCRIPT -----------------
+# TAB 1: FULL SCRIPT
 with tab_code:
-    st.info(f"**Execution Status:** {current_v_data['status']}")
-    st.markdown(
-        "👉 **Ready for GitHub:** Hover over the top-right corner of the code box below and click the **Copy icon**, then paste directly into GitHub."
-    )
-
-    col_btn1, col_btn2 = st.columns([1, 4])
-    with col_btn1:
+    col_stat, col_btn = st.columns([3, 1])
+    with col_stat:
+        st.info(f"**Execution Status:** {current_v_data['status']}")
+    with col_btn:
         st.download_button(
-            label="📥 Download Script as .py",
+            label="📥 Download .py File",
             data=active_code,
             file_name=f"{selected_p_name}_v{active_v_num}.py",
             mime="text/plain",
             use_container_width=True,
         )
 
+    st.caption("Hover over the top-right corner of the code block below and click the **Copy icon** to copy into GitHub.")
     st.code(active_code, language="python")
 
-# ----------------- TAB 2: MISSING ITEMS -----------------
+# TAB 2: MISSING ITEMS
 with tab_missing:
-    st.subheader("🔍 Missing Dependencies & Environment Audit")
+    st.subheader("🔍 Missing Dependencies & Configuration Audit")
     st.write(current_v_data["missing"])
-    st.info(
-        "💡 If any external packages are highlighted above, add them to your `requirements.txt` file."
-    )
 
-# ----------------- TAB 3: ERROR SOLUTION -----------------
+# TAB 3: ERROR SOLUTION
 with tab_error:
-    st.subheader("🛠️ Root Cause Diagnosis & Solution Details")
+    st.subheader("🛠️ Error Diagnosis & Fix Details")
     st.write(current_v_data["error"])
 
-# ----------------- TAB 4: INNOVATIVE IDEAS & PROCEED -----------------
+# TAB 4: INNOVATIVE IDEAS & PROCEED
 with tab_ideas:
-    st.subheader(f"💡 Innovative Feature Suggestions for `{selected_p_name}`")
-    st.caption(
-        "Analyze your current code to generate 5-6 tailored, high-value ideas complete with visual flow diagrams:"
-    )
+    st.subheader(f"💡 Innovative Features for `{selected_p_name}`")
+    st.caption("Analyze your codebase to propose 5-6 features with architecture flowcharts:")
 
     if st.button("🔮 Generate 5-6 Smart Ideas for this Project"):
-        with st.spinner("Groq is analyzing project code to formulate smart ideas..."):
+        with st.spinner("Analyzing project architecture and formulating features..."):
             ideas_sys = """
-            You are a senior product architect and UI/UX expert.
-            Analyze the provided code and generate 5 to 6 innovative, highly practical features tailored to this project.
+            You are a senior product architect.
+            Analyze the provided code and generate 5 to 6 innovative, practical features tailored to this project.
             
             Return a JSON object containing an 'ideas' array:
             {
@@ -500,24 +575,23 @@ with tab_ideas:
                     {
                         "id": 1,
                         "title": "Short descriptive title (e.g., Automated PDF Report Export)",
-                        "diagram": "Clear ASCII Flowchart diagram showing step by step how data and UI flow (e.g., [User Click] -> [Process] -> [Export])",
-                        "description": "Clear explanation of what it does, how it works, and why it benefits the application",
-                        "prompt_to_apply": "Precise instruction to tell an AI to seamlessly integrate this feature into the script"
+                        "diagram": "Clear ASCII Flowchart diagram showing step by step how data flows (e.g., [User Click] -> [Process] -> [Export])",
+                        "description": "Clear explanation of what it does and why it benefits the app",
+                        "prompt_to_apply": "Precise instruction to tell an AI to integrate this feature cleanly"
                     }
                 ]
             }
             """
             try:
                 res_ideas = call_groq(
-                    model_choice,
                     ideas_sys,
-                    f"Current project code:\n{active_code}",
+                    f"Current code:\n{active_code}",
                     json_mode=True,
                 )
                 parsed_ideas = parse_ai_json(res_ideas)
                 ideas_list = parsed_ideas.get("ideas", [])
                 save_ideas(current_p_id, ideas_list)
-                st.success("New feature ideas generated successfully!")
+                st.success("New feature ideas generated!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to generate ideas: {str(e)}")
@@ -527,7 +601,7 @@ with tab_ideas:
     if saved_ideas:
         idea_titles = [f"{item['id']}. {item['title']}" for item in saved_ideas]
         selected_idea_title = st.selectbox(
-            "Select an idea to inspect its diagram and specs:", idea_titles
+            "Select an idea to inspect details & diagram:", idea_titles
         )
 
         selected_idea_idx = idea_titles.index(selected_idea_title)
@@ -535,24 +609,22 @@ with tab_ideas:
 
         st.markdown(f"### 📌 {chosen_idea['title']}")
 
-        # Architecture flowchart
-        st.markdown("#### 📊 Architecture / Flow Diagram:")
+        st.markdown("#### 📊 Architecture / Data Flow:")
         st.code(
             chosen_idea.get("diagram", "[Input] --> [Process] --> [Output]"),
             language="text",
         )
 
-        st.markdown("#### 📝 Feature Overview:")
+        st.markdown("#### 📝 Overview:")
         st.write(chosen_idea.get("description", ""))
 
         st.divider()
-        st.markdown("#### 🚀 Automatic Integration:")
 
         if st.button(
             "👉 Proceed & Integrate this Feature into Code", type="primary"
         ):
             with st.spinner(
-                f"Groq is integrating '{chosen_idea['title']}' into your codebase..."
+                f"Integrating '{chosen_idea['title']}' into codebase..."
             ):
                 integrate_sys = """
                 You are a lead developer. You must integrate the requested feature into the existing code seamlessly.
@@ -573,7 +645,6 @@ with tab_ideas:
                 """
                 try:
                     res_int = call_groq(
-                        model_choice,
                         integrate_sys,
                         integ_prompt,
                         json_mode=True,
@@ -594,12 +665,12 @@ with tab_ideas:
                         "✅ Verified with new feature",
                     )
                     st.success(
-                        f"'{chosen_idea['title']}' integrated! Switched to new version. Check the [📋 Full Script] tab to copy."
+                        f"'{chosen_idea['title']}' integrated! Version updated. Go to [📋 Full Script] tab to copy."
                     )
                     st.rerun()
                 except Exception as e:
                     st.error(f"Integration failed: {str(e)}")
     else:
         st.info(
-            "Click 'Generate 5-6 Smart Ideas for this Project' above to inspect AI-recommended enhancements."
+            "Click 'Generate 5-6 Smart Ideas for this Project' above to formulate enhancement ideas."
         )
