@@ -17,7 +17,6 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-    /* Clean, modern aesthetic */
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
     .header-box {
         display: flex;
@@ -54,7 +53,7 @@ DB_FILE = "code_studio.db"
 
 
 # =========================================================
-# 2. DYNAMIC MODEL RESOLVER
+# 2. DYNAMIC MODEL RESOLVER (Zero-404 Guarantee)
 # =========================================================
 @st.cache_resource
 def get_best_groq_model():
@@ -86,11 +85,12 @@ GROQ_MODEL = get_best_groq_model()
 
 
 # =========================================================
-# 3. DATABASE (SQLite)
+# 3. SELF-HEALING DATABASE (SQLite)
 # =========================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    # 1. Ensure projects table exists
     c.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +98,7 @@ def init_db():
             created_at TEXT
         )
     """)
+    # 2. Ensure versions table exists
     c.execute("""
         CREATE TABLE IF NOT EXISTS versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,6 +112,19 @@ def init_db():
         )
     """)
     conn.commit()
+
+    # 3. Self-Healing Migration: Add 'summary' column if missing from existing DB
+    c.execute("PRAGMA table_info(versions)")
+    existing_columns = [col[1] for col in c.fetchall()]
+    if "summary" not in existing_columns:
+        try:
+            c.execute(
+                "ALTER TABLE versions ADD COLUMN summary TEXT DEFAULT 'Project updated.'"
+            )
+            conn.commit()
+        except Exception:
+            pass
+
     conn.close()
 
 
@@ -181,7 +195,7 @@ def get_versions(p_id):
     c = conn.cursor()
     c.execute(
         """
-        SELECT version_num, change_note, created_at, code, summary 
+        SELECT version_num, change_note, created_at, code, COALESCE(summary, 'No summary available.') 
         FROM versions WHERE project_id = ? ORDER BY version_num DESC
     """,
         (p_id,),
@@ -234,7 +248,6 @@ with st.sidebar:
     st.caption(f"Engine: `{GROQ_MODEL}`")
     st.divider()
 
-    # Project selection or Creation
     if all_projects:
         p_dict = {name: pid for pid, name in all_projects}
         selected_p_name = st.selectbox(
@@ -242,12 +255,17 @@ with st.sidebar:
         )
         current_p_id = p_dict[selected_p_name]
 
-        # Version Rollback
+        # Version handling with safety checks
         versions = get_versions(current_p_id)
+        if not versions:
+            st.warning("No versions found for this project.")
+            st.stop()
+
         current_v = versions[0]
         active_files = parse_files(current_v[3])
         active_v_num = current_v[0]
 
+        # Version Rollback
         st.subheader("⏪ Rollback History")
         version_names = [f"v{v[0]}: {v[1]} ({v[2]})" for v in versions]
         chosen_v_str = st.selectbox("Restore Past Version", version_names)
@@ -266,7 +284,7 @@ with st.sidebar:
                 st.rerun()
 
         st.divider()
-        # Delete Project (clean, direct confirmation)
+        # Direct Delete confirmation
         with st.expander("🗑️ Delete this Project"):
             st.warning(f"Delete **{selected_p_name}** and all its history?")
             if st.button(
