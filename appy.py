@@ -8,7 +8,7 @@ import streamlit as st
 # 1. PAGE SETUP & STYLING
 # =========================================================
 st.set_page_config(
-    page_title="AI Code Studio",
+    page_title="AI Code Studio (Multi-File)",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -43,6 +43,14 @@ st.markdown(
         font-size: 0.85rem;
         font-weight: 700;
     }
+    .file-badge {
+        background: #475569;
+        color: #f8fafc;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-family: monospace;
+    }
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
@@ -68,7 +76,7 @@ DB_FILE = "code_studio.db"
 
 
 # =========================================================
-# 2. DYNAMIC MODEL RESOLVER (Zero-404 Guarantee)
+# 2. DYNAMIC MODEL RESOLVER
 # =========================================================
 @st.cache_resource
 def get_best_groq_model():
@@ -104,7 +112,30 @@ GROQ_MODEL = get_best_groq_model()
 
 
 # =========================================================
-# 3. DATABASE ENGINE (SQLite)
+# 3. MULTI-FILE SERIALIZATION HELPERS
+# =========================================================
+def parse_version_files(raw_str):
+    """Parses code JSON into a file dictionary or adapts legacy raw strings."""
+    try:
+        data = json.loads(raw_str)
+        if isinstance(data, dict) and "app.py" in data:
+            return data
+    except Exception:
+        pass
+    # Backward compatibility fallback
+    return {
+        "app.py": raw_str,
+        "requirements.txt": "streamlit\ngroq\n",
+    }
+
+
+def serialize_files(files_dict):
+    """Serializes files dictionary to JSON for database storage."""
+    return json.dumps(files_dict)
+
+
+# =========================================================
+# 4. DATABASE ENGINE (SQLite)
 # =========================================================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -152,7 +183,7 @@ def get_projects():
     return rows
 
 
-def create_project(name, code, note="Initial Code"):
+def create_project(name, files_dict, note="Initial Code"):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -165,7 +196,7 @@ def create_project(name, code, note="Initial Code"):
         INSERT INTO versions (project_id, version_num, code, change_note, missing_items, error_solution, run_status, created_at)
         VALUES (?, 1, ?, ?, 'No missing dependencies detected.', 'No errors reported.', '✅ Script verified and ready.', ?)
     """,
-        (p_id, code, note, now),
+        (p_id, serialize_files(files_dict), note, now),
     )
     conn.commit()
     conn.close()
@@ -174,7 +205,7 @@ def create_project(name, code, note="Initial Code"):
 
 def save_version(
     p_id,
-    code,
+    files_dict,
     note,
     missing="No missing items detected.",
     err_sol="No error report required.",
@@ -193,7 +224,7 @@ def save_version(
         INSERT INTO versions (project_id, version_num, code, change_note, missing_items, error_solution, run_status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """,
-        (p_id, new_v, code, note, missing, err_sol, status, now),
+        (p_id, new_v, serialize_files(files_dict), note, missing, err_sol, status, now),
     )
     conn.commit()
     conn.close()
@@ -252,9 +283,9 @@ def get_saved_ideas(p_id):
 
 
 # =========================================================
-# 4. INTERNAL GROQ CALLER
+# 5. INTERNAL GROQ CALLER
 # =========================================================
-def call_groq(system_prompt, user_prompt, json_mode=False):
+def call_groq(system_prompt, user_prompt, json_mode=True):
     client = Groq(api_key=GROQ_API_KEY)
     kwargs = {
         "model": GROQ_MODEL,
@@ -283,7 +314,7 @@ def parse_ai_json(raw_text):
 
 
 # =========================================================
-# 5. SIDEBAR NAVIGATION
+# 6. SIDEBAR NAVIGATION
 # =========================================================
 all_projects = get_projects()
 
@@ -314,11 +345,11 @@ with st.sidebar:
         )
         current_p_id = p_dict[selected_p_name]
         versions = get_versions(current_p_id)
-        current_v_data = versions[0]  # Latest version by default
+        current_v_data = versions[0]  # Latest version
 
 
 # =========================================================
-# 6. FULL-SCREEN PROJECT CREATION PAGE
+# 7. FULL-SCREEN PROJECT CREATION PAGE
 # =========================================================
 if st.session_state["view"] == "create_project" or not all_projects:
     st.markdown(
@@ -327,7 +358,7 @@ if st.session_state["view"] == "create_project" or not all_projects:
         <span class="badge">PROJECT BUILDER</span>
         <h1 style="margin: 0; font-size: 2.2rem; font-weight: 800;">🚀 Start a New Project</h1>
         <p style="color: #94a3b8; font-size: 1.05rem; margin-top: 8px;">
-            Create a completely new website with AI, or import an existing codebase to manage and edit.
+            Files are automatically kept separate. You will get clean, dedicated tabs for <code>app.py</code> and <code>requirements.txt</code>.
         </p>
     </div>
     """,
@@ -348,7 +379,7 @@ if st.session_state["view"] == "create_project" or not all_projects:
             scratch_prompt = st.text_area(
                 "Describe the website you want to build:",
                 height=180,
-                placeholder="e.g., Build a modern Streamlit app for tracking daily habits. Include streak counters, weekly progress charts, category filters, and clean styling...",
+                placeholder="e.g., Build a modern Streamlit app for tracking daily habits with charts, login, and weekly stats...",
             )
             if st.button(
                 "🚀 Generate & Open Studio",
@@ -356,75 +387,107 @@ if st.session_state["view"] == "create_project" or not all_projects:
                 use_container_width=True,
             ):
                 if scratch_name.strip() and scratch_prompt.strip():
-                    with st.spinner("Generating complete codebase..."):
-                        sys_p = "You are an elite software architect. Generate a 100% complete, fully working single-file Python/Streamlit script based on the prompt. Do not omit code. Return only raw code inside triple backticks."
-                        code_res = call_groq(
-                            sys_p, scratch_prompt, json_mode=False
-                        )
-                        cleaned = (
-                            "\n".join(code_res.splitlines()[1:-1])
-                            if code_res.strip().startswith("```")
-                            else code_res
-                        )
+                    with st.spinner("Generating separate files with Groq..."):
+                        sys_p = """
+                        You are an elite software architect. Generate a complete Streamlit application.
+                        You MUST return a JSON object with:
+                        {
+                            "files": {
+                                "app.py": "100% complete Python code without omissions",
+                                "requirements.txt": "Exact pip dependencies, one per line (e.g. streamlit\\npandas)"
+                            },
+                            "summary": "Brief summary of what was generated"
+                        }
+                        """
                         try:
+                            code_res = call_groq(
+                                sys_p, scratch_prompt, json_mode=True
+                            )
+                            parsed = parse_ai_json(code_res)
+                            files = parsed.get(
+                                "files",
+                                {
+                                    "app.py": "# Generated code",
+                                    "requirements.txt": "streamlit\ngroq\n",
+                                },
+                            )
                             create_project(
                                 scratch_name.strip(),
-                                cleaned,
-                                f"Generated from prompt: {scratch_prompt[:35]}...",
+                                files,
+                                f"Created: {scratch_prompt[:35]}...",
                             )
                             st.session_state["view"] = "workspace"
                             st.rerun()
                         except sqlite3.IntegrityError:
                             st.error("A project with this name already exists!")
+                        except Exception as e:
+                            st.error(f"Generation error: {str(e)}")
                 else:
                     st.warning("Please provide both a project name and prompt.")
 
         with c2:
             st.info("""
-            **💡 What happens next:**
-            - The AI writes the 100% complete script (no placeholders).
-            - It saves it as **Version 1 (v1)**.
-            - You can immediately copy it to GitHub, make edits, or test new ideas.
+            **💡 Isolated File Guarantees:**
+            - `app.py` contains **pure Python code**.
+            - `requirements.txt` contains **only pip package names**.
+            - No accidental mixing when copying to GitHub!
             """)
 
     with tab_paste:
         paste_name = st.text_input(
             "Project Name", placeholder="e.g., My-Portfolio", key="paste_name"
         )
-        paste_code = st.text_area(
-            "Paste your existing code here:",
-            height=220,
-            placeholder="Paste your long script here...",
-            key="paste_code",
-        )
+        col_p1, col_p2 = st.columns([3, 2])
+        with col_p1:
+            paste_app = st.text_area(
+                "Paste content for app.py:",
+                height=220,
+                placeholder="Paste your python script here...",
+                key="paste_app",
+            )
+        with col_p2:
+            paste_req = st.text_area(
+                "Paste requirements.txt (Optional):",
+                height=220,
+                value="streamlit\ngroq\n",
+                placeholder="streamlit\npandas\nrequests",
+                key="paste_req",
+            )
+
         if st.button(
             "💾 Save & Open Studio", type="primary", use_container_width=True
         ):
-            if paste_name.strip() and paste_code.strip():
+            if paste_name.strip() and paste_app.strip():
                 try:
-                    create_project(paste_name.strip(), paste_code.strip())
+                    files_to_save = {
+                        "app.py": paste_app.strip(),
+                        "requirements.txt": paste_req.strip()
+                        if paste_req.strip()
+                        else "streamlit\n",
+                    }
+                    create_project(paste_name.strip(), files_to_save)
                     st.session_state["view"] = "workspace"
                     st.rerun()
                 except sqlite3.IntegrityError:
                     st.error("A project with this name already exists!")
             else:
-                st.warning("Please provide both a project name and your code.")
+                st.warning("Please provide a project name and your app.py code.")
 
     st.stop()
 
 
 # =========================================================
-# 7. ACTIVE WORKSPACE
+# 8. ACTIVE WORKSPACE
 # =========================================================
 active_v_num = current_v_data[0]
 active_note = current_v_data[1]
 active_created = current_v_data[2]
-active_code = current_v_data[3]
+active_files = parse_version_files(current_v_data[3])
 active_missing = current_v_data[4]
 active_error = current_v_data[5]
 active_status = current_v_data[6]
 
-total_lines = len(active_code.splitlines())
+total_lines_app = len(active_files.get("app.py", "").splitlines())
 
 # Workspace Header
 st.markdown(
@@ -433,7 +496,7 @@ st.markdown(
     <div>
         <span style="font-size: 1.5rem; font-weight: 800; color: #f8fafc;">📁 {selected_p_name}</span>
         <span style="margin-left: 12px;" class="version-pill">Active: v{active_v_num}</span>
-        <span style="margin-left: 10px; color: #94a3b8; font-size: 0.88rem;">({total_lines} lines of code)</span>
+        <span style="margin-left: 10px; color: #94a3b8; font-size: 0.88rem;">(app.py: {total_lines_app} lines)</span>
     </div>
     <div style="color: #cbd5e1; font-size: 0.9rem;">
         Latest Edit: <em>{active_note}</em>
@@ -466,14 +529,14 @@ with st.container():
         user_error = st.text_area(
             "Paste terminal or Streamlit red error traceback:",
             height=110,
-            placeholder="e.g., StreamlitDuplicateElementKey: There are multiple identical elements with key='submit'...",
+            placeholder="e.g., ModuleNotFoundError: No module named 'plotly' OR StreamlitDuplicateElementKey...",
             label_visibility="collapsed",
         )
         fix_error_btn = st.button(
             "🛠️ Fix Error Now", use_container_width=True
         )
 
-# AI Execution Logic
+# AI Execution Logic with Isolated File Output
 if apply_btn or fix_error_btn:
     req_type = "ERROR_FIX" if fix_error_btn else "FEATURE_CHANGE"
     target_prompt = user_error if fix_error_btn else user_change
@@ -481,27 +544,35 @@ if apply_btn or fix_error_btn:
     if not target_prompt.strip():
         st.warning("Please type a change instruction or paste an error.")
     else:
-        with st.spinner("AI is refactoring, testing, and generating full code..."):
+        with st.spinner("AI is refactoring files with separate outputs..."):
             sys_prompt = """
             You are a senior software architect and Python/Streamlit debugger.
-            You will receive the CURRENT CODE and a REQUEST (either a modification or a traceback error).
+            You will receive the CURRENT FILES (app.py, requirements.txt) and a REQUEST (either a modification or traceback error).
             
             You MUST return a valid JSON object with these exact keys:
             {
-                "full_code": "The 100% complete, fully working updated script without any omissions or placeholders",
-                "run_status": "Brief message confirming if the code is verified to run smoothly (e.g., '✅ Code verified and ready to run.')",
-                "missing_items": "Bullet points listing any missing requirements.txt packages, environment variables, or files",
-                "error_solution": "Detailed breakdown: why the error occurred and how it was resolved in code",
-                "changelog": "Brief summary of what lines or features were updated"
+                "files": {
+                    "app.py": "The 100% complete updated Python script without omissions",
+                    "requirements.txt": "The exact list of pip dependencies required, one per line"
+                },
+                "run_status": "Brief message confirming if the code is verified (e.g., '✅ Code verified and ready to run.')",
+                "missing_items": "Bullet points listing any environment variables or setup notes",
+                "error_solution": "Detailed breakdown: why the error occurred and how it was resolved",
+                "changelog": "Brief summary of what was updated"
             }
-            CRITICAL: 'full_code' must be complete from top to bottom. Do NOT write placeholders like '// rest of code'.
+            CRITICAL: 'app.py' must be complete from top to bottom. Do NOT write placeholders like '// rest of code'.
+            'requirements.txt' must ONLY contain package names, nothing else.
             """
 
             u_prompt = f"""
             [REQUEST TYPE]: {req_type}
             
-            [CURRENT CODE]:
-            {active_code}
+            [CURRENT FILES]:
+            --- app.py ---
+            {active_files.get('app.py', '')}
+            
+            --- requirements.txt ---
+            {active_files.get('requirements.txt', '')}
             
             [USER INSTRUCTION / ERROR]:
             {target_prompt}
@@ -511,7 +582,7 @@ if apply_btn or fix_error_btn:
                 res = call_groq(sys_prompt, u_prompt, json_mode=True)
                 parsed = parse_ai_json(res)
 
-                new_code = parsed.get("full_code", active_code)
+                new_files = parsed.get("files", active_files)
                 missing_info = parsed.get(
                     "missing_items", "All dependencies are satisfied."
                 )
@@ -523,26 +594,26 @@ if apply_btn or fix_error_btn:
 
                 save_version(
                     current_p_id,
-                    new_code,
+                    new_files,
                     note,
                     missing_info,
                     err_info,
                     status_info,
                 )
-                st.success("New version created and saved successfully!")
+                st.success("New version created and saved with separated files!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Processing error: {str(e)}")
 
 
 # =========================================================
-# 8. WORKSPACE TABS
+# 9. WORKSPACE TABS
 # =========================================================
 st.divider()
 
 tab_code, tab_history, tab_missing, tab_error, tab_ideas, tab_settings = (
     st.tabs([
-        "📋 1. Full Script (Copy/Download)",
+        "📁 1. Project Files (Separated)",
         "📜 2. Edit History & Timeline",
         "⚠️ 3. Missing Dependencies",
         "🔍 4. Error Diagnosis",
@@ -551,36 +622,55 @@ tab_code, tab_history, tab_missing, tab_error, tab_ideas, tab_settings = (
     ])
 )
 
-# ----------------- TAB 1: FULL SCRIPT -----------------
+# ----------------- TAB 1: SEPARATED PROJECT FILES -----------------
 with tab_code:
-    col_stat, col_btn = st.columns([3, 1])
-    with col_stat:
-        st.info(
-            f"**Status:** {active_status} &nbsp;|&nbsp; **Lines:** {total_lines}"
-        )
-    with col_btn:
-        st.download_button(
-            label="📥 Download .py File",
-            data=active_code,
-            file_name=f"{selected_p_name}_v{active_v_num}.py",
-            mime="text/plain",
-            use_container_width=True,
-        )
+    st.info(f"**Status:** {active_status}")
 
-    st.markdown(
-        "👉 **Ready for GitHub:** Click the **Copy icon** at the top right corner of the code block below, then paste directly into GitHub."
-    )
-    st.code(active_code, language="python")
+    # Sub-tabs for each separate file!
+    sub_app, sub_req = st.tabs(["📄 app.py", "📄 requirements.txt"])
+
+    with sub_app:
+        c_head, c_dwn = st.columns([3, 1])
+        with c_head:
+            st.markdown(
+                "👉 **For GitHub (`app.py`):** Click the **Copy icon** at the top right of the box below. It contains **ONLY** Python code."
+            )
+        with c_dwn:
+            st.download_button(
+                label="📥 Download app.py",
+                data=active_files.get("app.py", ""),
+                file_name="app.py",
+                mime="text/x-python",
+                use_container_width=True,
+            )
+        st.code(active_files.get("app.py", ""), language="python")
+
+    with sub_req:
+        c_head2, c_dwn2 = st.columns([3, 1])
+        with c_head2:
+            st.markdown(
+                "👉 **For GitHub (`requirements.txt`):** Click the **Copy icon** at the top right of the box below. It contains **ONLY** package dependencies."
+            )
+        with c_dwn2:
+            st.download_button(
+                label="📥 Download requirements.txt",
+                data=active_files.get("requirements.txt", ""),
+                file_name="requirements.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+        st.code(active_files.get("requirements.txt", ""), language="text")
 
 # ----------------- TAB 2: EDIT HISTORY & ROLLBACK -----------------
 with tab_history:
     st.subheader(f"📜 Version History Timeline for `{selected_p_name}`")
     st.caption(
-        "Every change you made is recorded below. You can inspect or rollback to any previous version:"
+        "Every change is recorded. You can inspect or rollback to any previous version:"
     )
 
     for v in versions:
-        v_num, v_note, v_time, v_code, v_missing, v_err, v_status = v
+        v_num, v_note, v_time, v_raw_code, v_missing, v_err, v_status = v
+        v_files = parse_version_files(v_raw_code)
         is_current = v_num == active_v_num
 
         with st.expander(
@@ -601,7 +691,7 @@ with tab_history:
                     ):
                         save_version(
                             current_p_id,
-                            v_code,
+                            v_files,
                             f"Restored to v{v_num}",
                             v_missing,
                             v_err,
@@ -614,15 +704,20 @@ with tab_history:
                 else:
                     st.success("Currently Active")
 
-            st.markdown("##### Code at this version:")
-            st.code(v_code, language="python")
+            hist_app, hist_req = st.tabs(
+                [f"app.py (v{v_num})", f"requirements.txt (v{v_num})"]
+            )
+            with hist_app:
+                st.code(v_files.get("app.py", ""), language="python")
+            with hist_req:
+                st.code(v_files.get("requirements.txt", ""), language="text")
 
 # ----------------- TAB 3: MISSING DEPENDENCIES -----------------
 with tab_missing:
     st.subheader("🔍 Missing Dependencies & Configuration Audit")
     st.write(active_missing)
     st.info(
-        "💡 If any external Python packages are listed above, make sure to add them to your `requirements.txt`."
+        "💡 Check the `📄 requirements.txt` sub-tab under 'Project Files' to copy all needed packages directly."
     )
 
 # ----------------- TAB 4: ERROR DIAGNOSIS -----------------
@@ -633,7 +728,7 @@ with tab_error:
 # ----------------- TAB 5: INNOVATIVE IDEAS -----------------
 with tab_ideas:
     st.subheader(f"💡 Innovative Feature Suggestions for `{selected_p_name}`")
-    st.caption("Generate smart, project-specific features complete with architecture flowcharts:")
+    st.caption("Generate project-specific enhancements complete with architecture flowcharts:")
 
     if st.button("🔮 Generate 5-6 Smart Ideas for this Project"):
         with st.spinner("Analyzing project architecture and formulating features..."):
@@ -649,7 +744,7 @@ with tab_ideas:
                         "title": "Short descriptive title (e.g., Automated PDF Report Export)",
                         "diagram": "Clear ASCII Flowchart diagram showing step by step how data flows (e.g., [User Click] -> [Process] -> [Export])",
                         "description": "Clear explanation of what it does and why it benefits the app",
-                        "prompt_to_apply": "Precise instruction to tell an AI to integrate this feature cleanly"
+                        "prompt_to_apply": "Precise instruction to tell an AI to integrate this feature cleanly into app.py and requirements.txt"
                     }
                 ]
             }
@@ -657,7 +752,7 @@ with tab_ideas:
             try:
                 res_ideas = call_groq(
                     ideas_sys,
-                    f"Current code:\n{active_code}",
+                    f"Current app.py:\n{active_files.get('app.py', '')}",
                     json_mode=True,
                 )
                 parsed_ideas = parse_ai_json(res_ideas)
@@ -702,15 +797,22 @@ with tab_ideas:
                 You are a lead developer. You must integrate the requested feature into the existing code seamlessly.
                 Return a valid JSON object:
                 {
-                    "full_code": "100% complete updated script with the new feature integrated",
-                    "missing_items": "Any new libraries required for this feature",
+                    "files": {
+                        "app.py": "100% complete updated Python script",
+                        "requirements.txt": "Updated requirements.txt with any new packages included"
+                    },
                     "run_status": "✅ Feature integrated and verified successfully.",
-                    "error_solution": "Feature integrated cleanly without syntax errors."
+                    "error_solution": "Feature integrated cleanly without syntax errors.",
+                    "missing_items": "Any new setup notes"
                 }
                 """
                 integ_prompt = f"""
-                CURRENT CODE:
-                {active_code}
+                CURRENT FILES:
+                --- app.py ---
+                {active_files.get('app.py', '')}
+                
+                --- requirements.txt ---
+                {active_files.get('requirements.txt', '')}
 
                 FEATURE TO INTEGRATE:
                 {chosen_idea['prompt_to_apply']}
@@ -722,13 +824,11 @@ with tab_ideas:
                         json_mode=True,
                     )
                     parsed_int = parse_ai_json(res_int)
-                    new_integrated_code = parsed_int.get(
-                        "full_code", active_code
-                    )
+                    new_integrated_files = parsed_int.get("files", active_files)
 
                     save_version(
                         current_p_id,
-                        new_integrated_code,
+                        new_integrated_files,
                         f"Integrated: {chosen_idea['title']}",
                         parsed_int.get(
                             "missing_items", "No extra dependencies."
@@ -737,7 +837,7 @@ with tab_ideas:
                         "✅ Verified with new feature",
                     )
                     st.success(
-                        f"'{chosen_idea['title']}' integrated! Version updated. Go to [📋 Full Script] tab to copy."
+                        f"'{chosen_idea['title']}' integrated! Version updated. Go to [📁 Project Files] tab to copy."
                     )
                     st.rerun()
                 except Exception as e:
